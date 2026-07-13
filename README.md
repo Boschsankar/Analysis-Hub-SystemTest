@@ -6,7 +6,7 @@ A Streamlit dashboard hub for smart-meter operations and analysis workflows. The
 
 - **GW Data Analysis**: Gateway SoC, supply-source, phase, and latitude/longitude insights.
 - **ESW Flag Control**: Inspect and modify critical ESW binary payload bits.
-- **Daily Data Analysis**: Review daily smart-meter status and data quality.
+- **Daily Data Analysis**: Review daily smart-meter status and data quality from xlsx, xls, csv, txt, or zipped profile uploads.
 - **Weekly Data Analysis**: Summarize weekly SLA trends, gaps, and report health.
 
 ## Project Structure
@@ -45,6 +45,14 @@ Open the app at:
 
 ```text
 http://localhost:8501
+```
+
+## Share Checklist
+
+```powershell
+python -m pip install -r requirements.txt
+python -m compileall -q _pages Home.py utils
+python -m streamlit run Home.py
 ```
 
 ## Dependency Check

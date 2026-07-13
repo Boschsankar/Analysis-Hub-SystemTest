@@ -1,0 +1,16 @@
+# Include all necessary files in the package
+include README.md
+include LICENSE.txt
+include requirements.txt
+include requirements-dev.txt
+include .streamlit/config.toml
+
+# Include all Python packages
+recursive-include _pages *.py
+recursive-include utils *.py
+
+# Include documentation
+recursive-include docs *.md *.rst
+
+# Include examples
+recursive-include examples *.py *.xlsx *.csv

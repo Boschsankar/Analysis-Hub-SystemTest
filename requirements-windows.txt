@@ -1,0 +1,7 @@
+# Windows-specific requirements
+# Install with: pip install -r requirements-windows.txt
+
+-r requirements.txt
+
+# Windows-specific dependencies for Outlook email support
+pywin32>=311,<400

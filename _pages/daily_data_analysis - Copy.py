@@ -419,43 +419,7 @@ def _coerce_expected_count(value):
     return None
 
 
-def _normalize_meter_version(value) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, (int, np.integer)):
-        numeric_value = int(value)
-        if numeric_value == 1:
-            return "V1"
-        if numeric_value == 2:
-            return "V2"
-        return None
-    if isinstance(value, (float, np.floating)):
-        if np.isnan(value):
-            return None
-        numeric_value = int(value)
-        if numeric_value == 1:
-            return "V1"
-        if numeric_value == 2:
-            return "V2"
-        return None
-    text = str(value).strip().upper()
-    if not text or text in {"NAN", "NONE", "NA", "NULL"}:
-        return None
-    compact_text = re.sub(r"[^A-Z0-9]+", "", text)
-    if compact_text in {"V1", "1"}:
-        return "V1"
-    if compact_text in {"V2", "2"}:
-        return "V2"
-    if compact_text.startswith("V") and compact_text[1:].isdigit():
-        version_number = int(compact_text[1:])
-        if version_number == 1:
-            return "V1"
-        if version_number == 2:
-            return "V2"
-    return None
-
-
-def _resolve_expected_samples(row, instant_expected_mode: Optional[str] = None):
+def _resolve_expected_samples(row):
     profile_type = str(row.get("profile_type", "") or "").strip()
     profile_type_key = profile_type.lower()
 
@@ -503,11 +467,6 @@ def _resolve_expected_samples(row, instant_expected_mode: Optional[str] = None):
             return parsed_value
 
     if profile_type == "Instant":
-        if instant_expected_mode in {"V1", "V2"}:
-            return 3 if instant_expected_mode == "V1" else 48
-        meter_version = _normalize_meter_version(row.get("meter_version"))
-        if meter_version == "V1":
-            return 3
         return 48
     if profile_type in ("Daily", "Billing"):
         return 1
@@ -605,18 +564,6 @@ def run():
         billing_uploads = st.file_uploader("Upload Billing Profiles", type=["xlsx", "xls", "csv", "txt", "zip"], accept_multiple_files=True)
         meter_list_file = st.file_uploader("Upload Actual Meter List (.xlsx)", type=["xlsx"])
 
-    instant_expected_mode = st.selectbox(
-        "Instant expected sample mode",
-        options=["Auto from meter list", "V1 (3 per day)", "V2 (48 per day)"],
-        index=0,
-        help="Choose the expected instant-sample count to use for instant profiles.",
-    )
-    instant_expected_mode_value = None
-    if instant_expected_mode == "V1 (3 per day)":
-        instant_expected_mode_value = "V1"
-    elif instant_expected_mode == "V2 (48 per day)":
-        instant_expected_mode_value = "V2"
-
     if not any([block_uploads, instant_uploads, daily_uploads, billing_uploads, meter_list_file]):
         st.info("Provide parameter logs and configuration registers to compute analytics.")
         return
@@ -677,12 +624,6 @@ def run():
         else:
             st.error("No valid integration window definitions discovered.")
             return
-
-        version_col_found = next((c for c in ["meter_version", "meter_ver", "meter_version_type", "version", "ver", "meter_type"] if c in meter_list.columns), None)
-        if version_col_found:
-            meter_list["meter_version"] = meter_list[version_col_found].apply(_normalize_meter_version)
-        else:
-            meter_list["meter_version"] = None
 
         meter_col = _find_meter_column(meter_list.columns)
         if meter_col and meter_col != "meter_id": meter_list.rename(columns={meter_col: "meter_id"}, inplace=True)
@@ -748,22 +689,14 @@ def run():
     meter_summary["actual_samples"] = meter_summary["actual_samples"].fillna(0)
 
     reference_columns = [c for c in meter_list.columns if re.search(r"(expected|sla)", str(c), flags=re.IGNORECASE)]
-    if reference_columns or "meter_version" in meter_list.columns:
-        merge_columns = ["meter_id"]
-        if reference_columns:
-            merge_columns.extend(reference_columns)
-        if "meter_version" in meter_list.columns:
-            merge_columns.append("meter_version")
+    if reference_columns:
         meter_summary = meter_summary.merge(
-            meter_list[merge_columns].drop_duplicates("meter_id"),
+            meter_list[["meter_id", *reference_columns]].drop_duplicates("meter_id"),
             on="meter_id",
             how="left",
         )
 
-    meter_summary["expected_samples"] = meter_summary.apply(
-        lambda row: _resolve_expected_samples(row, instant_expected_mode=instant_expected_mode_value),
-        axis=1,
-    )
+    meter_summary["expected_samples"] = meter_summary.apply(_resolve_expected_samples, axis=1)
     meter_summary["achieved_percent"] = np.where(
         (meter_summary["actual_samples"] > 0) & (meter_summary["expected_samples"].notna()),
         (meter_summary["actual_samples"] / meter_summary["expected_samples"]) * 100,

@@ -8,9 +8,8 @@ def _init_state():
         st.session_state.index_direction = "Left to Right (0-based)"
 
 def _update_text_area(new_value: str):
+    # Single source of truth for the binary payload
     st.session_state.binary_str = new_value
-    # keep the bound text_area value in sync
-    st.session_state.binary_input = new_value
 
 def run():
     _init_state()
@@ -28,17 +27,21 @@ def run():
         help="Choose how bit positions are interpreted when editing."
     )
 
-    binary_str = st.text_area(
+    # We read from session_state.binary_str and do not assign a conflicting 'key="binary_input"'
+    raw_input = st.text_area(
         "🔢 Paste your meter payload (binary string):",
         value=st.session_state.binary_str,
-        key="binary_input",
         height=140,
         help="Enter only 0s and 1s. Example: 101010..."
     )
 
-    # sync session state if user edited the text_area directly
-    if binary_str != st.session_state.binary_str:
-        _update_text_area(binary_str)
+    # Clean up any accidental copy-pasted trailing spaces/newlines
+    cleaned_input = raw_input.strip() if raw_input else ""
+
+    # Sync session state if user edited the text_area directly
+    if cleaned_input != st.session_state.binary_str:
+        _update_text_area(cleaned_input)
+        st.rerun()
 
     # --- Validation and basic info ---
     if st.session_state.binary_str and not all(c in "01" for c in st.session_state.binary_str):
@@ -53,11 +56,10 @@ def run():
     length = len(binary_list)
     st.markdown(f"**Binary length:** {length} bits")
 
-    # helper to map displayed index -> actual list index based on direction
+    # Helper to map displayed index -> actual list index based on direction
     def to_actual_index(display_index: int) -> int:
         if st.session_state.index_direction.startswith("Left"):
             return display_index
-        # Right to left: display 0 corresponds to last element
         return length - 1 - display_index
 
     # --- Enabled/Disabled Lists ---
@@ -101,7 +103,7 @@ def run():
     for line in summary:
         st.write(f"- {line}")
 
-    # --- Quick Actions (unique keys) ---
+    # --- Quick Actions ---
     st.markdown("### ⚡ Quick Actions")
     col_a, col_b, col_c = st.columns(3)
     if col_a.button("Enable All Critical Bits", key="enable_all_critical"):
@@ -109,23 +111,23 @@ def run():
             if pos < length:
                 binary_list[to_actual_index(pos)] = "1"
         _update_text_area("".join(binary_list))
-        st.experimental_rerun()
+        st.rerun()
 
     if col_b.button("Disable All Critical Bits", key="disable_all_critical"):
         for pos in critical_bits.keys():
             if pos < length:
                 binary_list[to_actual_index(pos)] = "0"
         _update_text_area("".join(binary_list))
-        st.experimental_rerun()
+        st.rerun()
 
     if col_c.button("Reset Critical Bits (Default Disabled)", key="reset_critical"):
         for pos in critical_bits.keys():
             if pos < length:
                 binary_list[to_actual_index(pos)] = "0"
         _update_text_area("".join(binary_list))
-        st.experimental_rerun()
+        st.rerun()
 
-    # --- Manual Editor (use a form to avoid accidental multi-triggers) ---
+    # --- Manual Editor ---
     st.markdown("### 🔧 Modify Bit")
     max_pos = max(0, length - 1)
     with st.form(key="manual_edit_form"):
@@ -145,7 +147,7 @@ def run():
                 binary_list[actual_idx] = "1" if action.startswith("Enable") else "0"
                 _update_text_area("".join(binary_list))
                 st.success("Updated binary string.")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Position exceeds string length!")
 
@@ -153,7 +155,6 @@ def run():
     st.markdown("### 🔁 Current Binary")
     st.code(st.session_state.binary_str, language="text")
 
-    # Download button for the modified binary
     st.download_button(
         label="📥 Download binary as .txt",
         data=st.session_state.binary_str.encode("utf-8"),

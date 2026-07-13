@@ -1,9 +1,27 @@
-streamlit==1.57.0
-pandas==3.0.2
-numpy==2.4.4
-plotly==6.7.0
-altair==6.1.0
-matplotlib==3.10.9
-seaborn==0.13.2
-openpyxl==3.1.5
-pywin32==311
+# Core dependencies - Smart Meter Analysis Tools
+# Updated: 2026-06-03
+# These are the core dependencies required for the application to run.
+# For platform-specific dependencies, see requirements-windows.txt or requirements-unix.txt
+
+# Web Framework
+streamlit>=1.40.0,<2.0.0
+
+# Data Processing
+pandas>=2.0.0,<3.5.0
+numpy>=1.24.0,<2.5.0
+python-dateutil>=2.8.0,<3.0.0
+
+# Visualization
+plotly>=5.0.0,<6.0.0
+altair>=5.0.0,<6.0.0
+matplotlib>=3.6.0,<4.0.0
+seaborn>=0.12.0,<1.0.0
+
+# File I/O
+openpyxl>=3.8.0,<4.0.0
+xlrd>=2.0.0,<3.0.0
+xlsxwriter>=3.0.0,<4.0.0
+
+# Windows-specific (optional, for Outlook email support)
+# Note: pywin32 is Windows-only; install conditionally with: pip install "smartmeter-analysis-tools[windows]"
+# pywin32>=311; platform_system == "Windows"

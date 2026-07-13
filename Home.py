@@ -1,117 +1,135 @@
-"""Streamlit landing page for the Smart Meter analysis tools."""
+"""
+Smart Meter Analysis Tools - Main Entry Point
+Unified dashboard for all smart meter analysis utilities.
+"""
 
 from __future__ import annotations
 
+import logging
+import sys
 import importlib
-from dataclasses import dataclass
-from datetime import datetime
-from types import ModuleType
+from typing import Optional, Tuple
 
 import streamlit as st
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
-class ToolConfig:
-    title: str
-    module: str
-    accent: str
-    description: str
-    button_label: str
+# Import integration framework
+from _pages import ToolRegistry, ToolMetadata, ToolStatus, REGISTRY
+from utils.dependencies import DEPENDENCY_MANAGER, validate_environment
+from utils.platform_utils import PLATFORM_MANAGER
+from utils.error_handler import ErrorHandler
 
-
-TOOLS: tuple[ToolConfig, ...] = (
-    ToolConfig(
+# Tool definitions
+TOOLS_METADATA = [
+    ToolMetadata(
         title="GW Data Analysis",
-        module="_pages.gw_data_analysis",
-        accent="#2e7d32",
+        module_path="_pages.gw_data_analysis",
+        accent_color="#2e7d32",
         description="Gateway SoC, supply-source, phase, and location insights.",
         button_label="Open GW Analysis",
+        category="analysis",
+        dependencies=["pandas", "plotly"],
     ),
-    ToolConfig(
+    ToolMetadata(
         title="ESW Flag Control",
-        module="_pages.esw_flag_control",
-        accent="#1565c0",
+        module_path="_pages.esw_flag_control",
+        accent_color="#1565c0",
         description="Inspect and modify critical ESW payload bits.",
         button_label="Open ESW Control",
+        category="utilities",
     ),
-    ToolConfig(
+    ToolMetadata(
         title="Daily Data Analysis",
-        module="_pages.daily_data_analysis",
-        accent="#ef6c00",
+        module_path="_pages.daily_data_analysis",
+        accent_color="#ef6c00",
         description="Review daily smart-meter status and data quality.",
         button_label="Open Daily Analysis",
+        category="analysis",
+        dependencies=["pandas", "plotly"],
     ),
-    ToolConfig(
+    ToolMetadata(
         title="Weekly Data Analysis",
-        module="_pages.weekly_data_analysis",
-        accent="#6a1b9a",
+        module_path="_pages.weekly_data_analysis",
+        accent_color="#6a1b9a",
         description="Summarize weekly trends, gaps, and report health.",
         button_label="Open Weekly Analysis",
+        category="analysis",
+        dependencies=["pandas", "plotly"],
     ),
-)
-
-DEFAULT_STATUS = {"imported": False, "message": "", "opened": False}
+    ToolMetadata(
+        title="Block Data Validation",
+        module_path="_pages.block_data_validation_1p_hpl",
+        accent_color="#b71c1c",
+        description="Validate block OBIS registers against expected load profiles.",
+        button_label="Open Block Validator",
+        category="validation",
+        dependencies=["pandas", "plotly"],
+    ),
+]
 
 
 def configure_page() -> None:
-    st.set_page_config(page_title="Smart Meter Analysis Hub", layout="wide")
+    """Configure Streamlit page settings and styling."""
+    st.set_page_config(
+        page_title="Smart Meter Analysis Hub",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    
     st.markdown(
         """
         <style>
             .tool-card {
                 border-left: 5px solid var(--accent-color);
-                padding: 0.25rem 0 0.15rem 0.35rem;
-                min-height: 118px;
+                padding: 1rem;
+                margin: 0.5rem 0;
+                border-radius: 0.5rem;
+                background-color: #f9f9f9;
+                transition: all 0.3s ease;
+            }
+            .tool-card:hover {
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                transform: translateX(4px);
             }
             .tool-card h3 {
-                margin: 0 0 0.35rem;
-                font-size: 1.05rem;
+                margin: 0 0 0.5rem;
+                font-size: 1.2rem;
                 font-weight: 700;
-                letter-spacing: 0;
             }
             .tool-card p {
-                margin: 0;
-                color: #475569;
-                font-size: 0.92rem;
-                line-height: 1.35;
+                margin: 0.25rem 0;
+                color: #666;
+                font-size: 0.95rem;
             }
-            .status-pill {
+            .status-badge {
                 display: inline-block;
-                margin-bottom: 0.55rem;
-                padding: 0.16rem 0.55rem;
-                border-radius: 999px;
-                background: #f1f5f9;
-                color: #334155;
-                font-size: 0.78rem;
-                font-weight: 700;
+                padding: 0.25rem 0.75rem;
+                border-radius: 20px;
+                font-size: 0.85rem;
+                font-weight: 600;
+                margin-bottom: 0.5rem;
             }
-            .status-pill.running {
-                background: #dcfce7;
-                color: #166534;
-            }
-            .status-pill.available {
+            .status-available {
                 background: #dbeafe;
                 color: #1d4ed8;
             }
-            .status-pill.issue {
+            .status-error {
                 background: #fee2e2;
                 color: #991b1b;
             }
-            .tool-banner {
+            .header-banner {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                padding: 0.85rem 1rem;
-                border-radius: 8px;
-                margin-bottom: 0.75rem;
-            }
-            .tool-banner h3 {
-                margin: 0;
-                font-size: 1.1rem;
-                font-weight: 700;
-                letter-spacing: 0;
-            }
-            .tool-banner p {
-                margin: 0.25rem 0 0;
-                opacity: 0.95;
+                padding: 2rem;
+                border-radius: 0.5rem;
+                margin-bottom: 2rem;
             }
         </style>
         """,
@@ -119,227 +137,200 @@ def configure_page() -> None:
     )
 
 
-def rerun_app() -> None:
-    rerun = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
-    if rerun:
-        rerun()
+def initialize_session_state() -> None:
+    """Initialize Streamlit session state variables."""
+    if "current_tool" not in st.session_state:
+        st.session_state.current_tool = None
+    if "tool_statuses" not in st.session_state:
+        st.session_state.tool_statuses = {}
+    if "env_validated" not in st.session_state:
+        st.session_state.env_validated = False
 
 
-def init_tool_status() -> None:
-    if "tool_status" not in st.session_state:
-        st.session_state.tool_status = {}
-    if "selected_tool" not in st.session_state:
-        st.session_state.selected_tool = TOOLS[0].title
-
-    for tool in TOOLS:
-        status = st.session_state.tool_status.setdefault(tool.module, DEFAULT_STATUS.copy())
-        if "message" not in status:
-            status["message"] = status.pop("msg", "")
-        if "imported" not in status:
-            status["imported"] = False
-        if "opened" not in status:
-            status["opened"] = False
+def validate_environment_once() -> Tuple[bool, str]:
+    """Validate the environment once per session."""
+    if st.session_state.env_validated:
+        return True, "Environment already validated."
+    
+    is_valid, message = validate_environment()
+    st.session_state.env_validated = True
+    
+    return is_valid, message
 
 
-def import_module_safe(module_name: str) -> tuple[ModuleType | None, str | None]:
+def register_tools() -> None:
+    """Register all tools with the registry."""
+    for metadata in TOOLS_METADATA:
+        try:
+            REGISTRY.register(metadata.module_path, metadata)
+            logger.info(f"Tool registered: {metadata.title}")
+        except Exception as e:
+            logger.error(f"Failed to register tool '{metadata.title}': {e}")
+            REGISTRY.set_status(
+                metadata.module_path,
+                ToolStatus.ERROR,
+                f"Registration failed: {e}"
+            )
+
+
+def import_and_run_tool(tool_metadata: ToolMetadata) -> Optional[str]:
+    """
+    Safely import and run a tool.
+    
+    Returns:
+        Error message if failed, None if successful
+    """
     try:
-        return importlib.import_module(module_name), None
-    except Exception as exc:
-        return None, f"{module_name} import failed: {exc}"
+        # Import the module
+        module = importlib.import_module(tool_metadata.module_path)
+        
+        # Find and call the run function
+        run_func = getattr(module, "run", None)
+        if not callable(run_func):
+            error_msg = f"Module '{tool_metadata.module_path}' does not have a callable 'run()' function."
+            logger.error(error_msg)
+            return error_msg
+        
+        # Execute the tool
+        run_func()
+        REGISTRY.set_status(tool_metadata.module_path, ToolStatus.AVAILABLE)
+        return None
+    
+    except ImportError as e:
+        error_msg = f"Failed to import module: {e}"
+        logger.error(error_msg)
+        REGISTRY.set_status(tool_metadata.module_path, ToolStatus.ERROR, error_msg)
+        return error_msg
+    
+    except Exception as e:
+        error_msg = f"Tool execution failed: {e}"
+        logger.error(error_msg)
+        REGISTRY.set_status(tool_metadata.module_path, ToolStatus.ERROR, error_msg)
+        return error_msg
 
 
-def run_tool(module: ModuleType, module_name: str) -> str | None:
-    for entrypoint in ("run", "main"):
-        callback = getattr(module, entrypoint, None)
-        if callable(callback):
-            try:
-                callback()
-                return None
-            except Exception as exc:
-                return f"{module_name}.{entrypoint} failed: {exc}"
-
-    return f"{module_name} does not expose a callable run() or main()."
-
-
-def update_status(
-    module_name: str,
-    imported: bool,
-    message: str = "",
-    opened: bool | None = None,
-) -> None:
-    current = st.session_state.tool_status.get(module_name, DEFAULT_STATUS.copy())
-    st.session_state.tool_status[module_name] = {
-        "imported": imported,
-        "message": message,
-        "opened": current["opened"] if opened is None else opened,
-    }
+def render_tool_card(metadata: ToolMetadata, col) -> None:
+    """Render a tool card in the given column."""
+    with col:
+        status = REGISTRY.get_status(metadata.module_path)
+        status_badge = "✅ Available" if status == ToolStatus.AVAILABLE else "⚠️ Check Dependencies"
+        
+        st.markdown(
+            f"""
+            <div class="tool-card" style="border-left-color: {metadata.accent_color};">
+                <h3>{metadata.title}</h3>
+                <p>{metadata.description}</p>
+                <span class="status-badge status-available">{status_badge}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        
+        if st.button(
+            metadata.button_label,
+            key=f"btn_{metadata.module_path}",
+            use_container_width=True,
+        ):
+            st.session_state.current_tool = metadata.module_path
 
 
-def show_status(module_name: str) -> None:
-    status = st.session_state.tool_status[module_name]
-    if status["message"]:
-        st.error(status["message"])
-    elif status["opened"]:
-        st.success("Running")
-    elif status["imported"]:
-        st.success("Available")
-    else:
-        st.info("Not checked")
-
-
-def get_status_label(module_name: str) -> tuple[str, str]:
-    status = st.session_state.tool_status[module_name]
-    if status["message"]:
-        return "Issue", "issue"
-    if status["opened"]:
-        return "Running", "running"
-    if status["imported"]:
-        return "Available", "available"
-    return "Not checked", ""
-
-
-def render_tool_switcher() -> ToolConfig:
-    st.subheader("Tool Workspace")
-    st.caption("Select a tool card to view, validate, or launch its dashboard.")
-
-    cols = st.columns(4)
-    for col, tool in zip(cols, TOOLS):
-        label, status_class = get_status_label(tool.module)
-        selected = st.session_state.selected_tool == tool.title
-        button_label = "Selected" if selected else "View"
-        with col:
-            with st.container(border=True):
-                st.markdown(
-                    f"""
-                    <div class="tool-card" style="--accent-color:{tool.accent};">
-                        <span class="status-pill {status_class}">{label}</span>
-                        <h3>{tool.title}</h3>
-                        <p>{tool.description}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    button_label,
-                    key=f"select_{tool.module}",
-                    disabled=selected,
-                    use_container_width=True,
-                ):
-                    st.session_state.selected_tool = tool.title
-                    rerun_app()
-
-    return next(tool for tool in TOOLS if tool.title == st.session_state.selected_tool)
-
-
-def render_tool(tool: ToolConfig) -> None:
-    status = st.session_state.tool_status[tool.module]
+def show_home_page() -> None:
+    """Display the home page with tool cards."""
     st.markdown(
-        f"""
-        <div class="tool-banner" style="background:{tool.accent};">
-            <h3>{tool.title}</h3>
-            <p>{tool.description}</p>
+        """
+        <div class="header-banner">
+            <h1>📊 Smart Meter Analysis Hub</h1>
+            <p>Comprehensive smart meter data analysis tools for SLA monitoring, data validation, and insights</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    show_status(tool.module)
-
-    launch_col, close_col = st.columns([1, 1])
-    with launch_col:
-        launch_clicked = st.button(
-            tool.button_label,
-            key=f"open_{tool.module}",
-            disabled=status["opened"],
-            use_container_width=True,
-        )
-    with close_col:
-        close_clicked = st.button(
-            "Close Tool",
-            key=f"close_{tool.module}",
-            disabled=not status["opened"],
-            use_container_width=True,
-        )
-
-    if close_clicked:
-        update_status(tool.module, False, opened=False)
-        rerun_app()
-
-    if launch_clicked:
-        module, import_error = import_module_safe(tool.module)
-        if import_error:
-            update_status(tool.module, False, import_error, opened=False)
-            st.error(import_error)
-            return
-
-        update_status(tool.module, True, opened=True)
-        rerun_app()
-
-    if not st.session_state.tool_status[tool.module]["opened"]:
-        st.caption("Launch this tool to load its dashboard in the current view.")
+    
+    # System Information
+    with st.expander("ℹ️ System Information", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        
+        platform_info = PLATFORM_MANAGER.get_platform_info()
+        
+        with col1:
+            st.metric("Platform", PLATFORM_MANAGER.system)
+        with col2:
+            st.metric("Python", platform_info["python_version"])
+        with col3:
+            st.metric("Tools Available", len(REGISTRY.get_all_tools()))
+        
+        # Dependency status
+        st.subheader("Dependencies Status")
+        st.code(DEPENDENCY_MANAGER.get_status_report())
+    
+    # Tools Grid
+    st.subheader("🛠️ Available Tools")
+    
+    tools = REGISTRY.get_all_tools()
+    if not tools:
+        st.warning("No tools registered. Please check the configuration.")
         return
+    
+    # Display tools in a grid
+    cols = st.columns(3)
+    for idx, (tool_id, metadata) in enumerate(tools.items()):
+        col = cols[idx % 3]
+        render_tool_card(metadata, col)
 
-    module, import_error = import_module_safe(tool.module)
-    if import_error:
-        update_status(tool.module, False, import_error, opened=False)
-        st.error(import_error)
+
+def show_tool_page() -> None:
+    """Display the currently selected tool."""
+    tool_id = st.session_state.current_tool
+    metadata = REGISTRY.get_tool(tool_id)
+    
+    if not metadata:
+        st.error("Tool not found in registry.")
         return
-
-    update_status(tool.module, True, opened=True)
-    execution_error = run_tool(module, tool.module)
-    if execution_error:
-        update_status(tool.module, False, execution_error, opened=False)
-        st.error(execution_error)
-
-
-def render_header() -> None:
-    imported_count = sum(
-        1 for status in st.session_state.tool_status.values() if status["imported"]
+    
+    # Create a back button
+    if st.button("← Back to Home"):
+        st.session_state.current_tool = None
+        st.rerun()
+    
+    # Display tool header
+    st.markdown(
+        f"""
+        <h1 style="color: {metadata.accent_color};">
+            {metadata.title}
+        </h1>
+        <p>{metadata.description}</p>
+        """,
+        unsafe_allow_html=True,
     )
-    issue_count = sum(
-        1 for status in st.session_state.tool_status.values() if status["message"]
-    )
-
-    st.title("Smart Meter Analysis Hub")
-    st.caption("Central workspace for opening smart-meter analysis tools on demand.")
-
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Available Tools", len(TOOLS))
-    metric_cols[1].metric("Validated Tools", imported_count)
-    metric_cols[2].metric("Tool Issues", issue_count)
-    metric_cols[3].metric("Last Refreshed", datetime.now().strftime("%d-%m-%Y %H:%M"))
-
-
-def import_all_tools() -> None:
-    for tool in TOOLS:
-        _, import_error = import_module_safe(tool.module)
-        update_status(tool.module, import_error is None, import_error or "")
-
-
-def reset_tool_status() -> None:
-    for tool in TOOLS:
-        update_status(tool.module, False, opened=False)
+    
+    # Run the tool
+    with st.spinner(f"Loading {metadata.title}..."):
+        error = import_and_run_tool(metadata)
+        if error:
+            st.error(f"Error running tool: {error}")
+            st.info("Please check your dependencies and try again.")
 
 
 def main() -> None:
+    """Main application entry point."""
     configure_page()
-    init_tool_status()
-    render_header()
-
-    st.divider()
-    selected_tool = render_tool_switcher()
-    st.divider()
-    render_tool(selected_tool)
-
-    st.divider()
-    left, right = st.columns(2)
-    with left:
-        if st.button("Check Tool Status", use_container_width=True):
-            import_all_tools()
-            rerun_app()
-    with right:
-        if st.button("Reset Tool Status", use_container_width=True):
-            reset_tool_status()
-            rerun_app()
+    initialize_session_state()
+    
+    # Validate environment
+    is_valid, env_msg = validate_environment_once()
+    if not is_valid:
+        st.error("Environment validation failed!")
+        st.error(env_msg)
+        st.stop()
+    
+    # Register tools
+    register_tools()
+    
+    # Show home or tool page
+    if st.session_state.current_tool:
+        show_tool_page()
+    else:
+        show_home_page()
 
 
 if __name__ == "__main__":

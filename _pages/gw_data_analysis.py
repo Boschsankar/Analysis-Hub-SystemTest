@@ -295,7 +295,68 @@ def run():
     selected_cycle = cycles[options.index(choice)]
 
     # Analysis mode selector
-    analysis_mode = st.radio("📊 Select Analysis Type", ["🔋 SoC Analysis", "📍 Lat/Long Accuracy Analysis"], horizontal=True)
+    st.markdown("## Select Analysis Mode")
+    st.markdown("Choose the view you want to analyze clearly before reviewing the dashboard.")
+    if "gw_analysis_mode" not in st.session_state:
+        st.session_state.gw_analysis_mode = "🔋 SoC Analysis"
+
+    col_soc, col_loc = st.columns(2)
+    soc_active = st.session_state.gw_analysis_mode == "🔋 SoC Analysis"
+    lat_active = st.session_state.gw_analysis_mode == "📍 Lat/Long Accuracy Analysis"
+
+    with col_soc:
+        if st.button("🔋 SoC Analysis", key="gw_mode_soc", use_container_width=True):
+            st.session_state.gw_analysis_mode = "🔋 SoC Analysis"
+        st.markdown(
+            f"<div style='padding:12px;border-radius:12px;margin-top:10px;background:{'#dcfce7' if soc_active else '#f3f4f6'};border:1px solid {'#22c55e' if soc_active else '#d1d5db'};'>"
+            f"<strong style='font-size:16px;'>SoC Analysis</strong><br>"
+            f"<span style='font-size:13px;color:#334155;'>{'Selected: view SoC drop, recovery, trends, and battery health.' if soc_active else 'Click to analyze battery SoC cycle and status.'}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    with col_loc:
+        if st.button("📍 Lat/Long Accuracy", key="gw_mode_latlong", use_container_width=True):
+            st.session_state.gw_analysis_mode = "📍 Lat/Long Accuracy Analysis"
+        st.markdown(
+            f"<div style='padding:12px;border-radius:12px;margin-top:10px;background:{'#dbeafe' if lat_active else '#f3f4f6'};border:1px solid {'#3b82f6' if lat_active else '#d1d5db'};'>"
+            f"<strong style='font-size:16px;'>Lat/Long Accuracy</strong><br>"
+            f"<span style='font-size:13px;color:#334155;'>{'Selected: review location accuracy and distance error metrics.' if lat_active else 'Click to analyze gateway lat/long accuracy and error buckets.'}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    analysis_mode = st.session_state.gw_analysis_mode
+    st.markdown(
+        f"<div style='background:#f8fafc;padding:14px;border-radius:12px;border:1px solid #cbd5e1;margin-top:16px;'>"
+        f"<strong style='font-size:16px;'>Current mode:</strong> <span style='font-size:15px;color:#0f172a;'>{analysis_mode}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("## Why choose this mode?")
+    mode_explanation = {
+        "🔋 SoC Analysis": [
+            "Track battery backup duration and SoC drop trends.",
+            "Identify critical low-charge cycles and recovery behavior.",
+            "Validate battery health and operational readiness."
+        ],
+        "📍 Lat/Long Accuracy Analysis": [
+            "Review gateway location error buckets and distance trend.",
+            "See where reported coordinates are beyond acceptable range.",
+            "Prioritize mapping or GPS issues for corrective action."
+        ]
+    }
+    explanation_lines = mode_explanation.get(analysis_mode, [])
+    st.markdown(
+        f"<div style='background:#ffffff;padding:18px;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:20px;'>"
+        f"<strong style='font-size:16px;color:#1e293b;'>{analysis_mode} checklist</strong><br>"
+        f"<ul style='margin-top:10px;font-size:14px;color:#334155;padding-left:18px;'>"
+        + "".join([f"<li style='margin-bottom:6px;'>{item}</li>" for item in explanation_lines])
+        + "</ul>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
     if analysis_mode == "📍 Lat/Long Accuracy Analysis":
         if lat_col is None or lon_col is None:
@@ -578,6 +639,13 @@ def run():
     - 🛰️  **Gateway Id ({gateway_col}):** {gateway_id_value}
     - 📅 **Reported Date:** {reported_date_col if reported_date_col else '(not found)'}
     """)
+        st.markdown("## Decision Insights")
+        st.markdown(f"""
+    - 🔍 **Action Required:** {'Focus on segments where SoC drops below 10% or recovery is under 40%.' if status != '🟢 Healthy' else 'System is currently healthy; monitor for any future steep SoC declines.'}
+    - 📈 **Trend Signal:** { 'Rapid SoC drops suggest battery exhaustion or high standby drain.' if soc_drop_rate > 10 else 'SoC change rate is stable for this cycle.' }
+    - 🚨 **Critical Trigger:** {'Any SoC ≤ 6% should be investigated immediately.' if (cycle_df['SoCBattery'].notna() & (cycle_df['SoCBattery'] <= 6)).any() else 'No critical SoC worrisome values detected.' }
+    - 🛠️ **Recommended Review:** {'Inspect mains transition timing and battery health for high drop rates.' if soc_drop_rate > 20 or soc_recovery < 40 else 'Maintain current battery usage pattern and validate the next cycle.'}
+    """)
     # -------------------------
     # Export / Download: CSVs and single self-contained HTML report
     # -------------------------
@@ -736,8 +804,18 @@ def run():
         fig_pie.update_traces(
             textposition='inside',
             textinfo='percent+label',
+            textfont=dict(size=18, family='Arial, sans-serif'),
+            insidetextorientation='radial',
             marker=dict(colors=['#2ca02c', '#90ee90', '#ffcc00', '#ff4d4d']),
             hovertemplate='%{label}: %{value} samples (%{percent})<extra></extra>'
+        )
+        fig_pie.update_layout(
+            width=800,
+            height=600,
+            margin=dict(t=80, b=50, l=50, r=50),
+            title_x=0.5,
+            title_font=dict(size=22),
+            legend=dict(font=dict(size=14))
         )
 
         # Add descriptive insight below the pie chart
@@ -749,7 +827,7 @@ def run():
         }
         insight_text = "\n".join([f"**{label}:** {bucket_insights[label]}" for label in accuracy_ranges])
         st.plotly_chart(fig_pie, use_container_width=True)
-        st.markdown(f"<div style='background:#f8f9fa;padding:12px;border-radius:8px;margin-top:-12px;line-height:1.5;'>" \
+        st.markdown(f"<div style='background:#f8f9fa;padding:16px;border-radius:10px;margin-top:-12px;line-height:1.6;'>" \
                     f"<strong>Accuracy insights</strong><br>{insight_text}</div>", unsafe_allow_html=True)
 
         # Interactive category selector for detailed samples
@@ -830,19 +908,94 @@ def run():
             "</div>",
             unsafe_allow_html=True
         )
+        st.markdown("## Decision Insights")
+        st.markdown("""
+    - 📌 **Primary action:** Investigate any samples in the > 20 m bucket first.
+    - 🔧 **Potential issue:** High GPS offset may indicate DCU hardware or mapping source problems.
+    - 📊 **Review threshold:** If more than 20% of samples are above 10 m, this cycle needs operational review.
+    - ✅ **Good sign:** Most samples in ≤ 5 m means location reporting is reliable.
+    """)
 
-        # Download lat/long analysis data
+        # Download lat/long analysis data and full report
         st.markdown("### 📥 Download Lat/Long Analysis Data")
         extra_cols = ["Supply Src"] if "Supply Src" in valid_points.columns else []
         if "SoCBattery" in valid_points.columns:
             extra_cols.append("SoCBattery")
         csv_latlong = valid_points[display_cols + extra_cols].to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Download Lat/Long Analysis CSV",
-            data=csv_latlong,
-            file_name="latlong_accuracy_analysis.csv",
-            mime="text/csv"
-        )
+
+        summary_data_latlong = {
+            "Gateway Id": [gateway_id_value],
+            "Reported Date": [reported_date_value],
+            "Samples Analyzed": [len(valid_points)],
+            "Min Error (m)": [f"{valid_distances.min():.2f}" if len(valid_distances) > 0 else "N/A"],
+            "Max Error (m)": [f"{valid_distances.max():.2f}" if len(valid_distances) > 0 else "N/A"],
+            "Mean Error (m)": [f"{valid_distances.mean():.2f}" if len(valid_distances) > 0 else "N/A"],
+            "Std Dev Error (m)": [f"{valid_distances.std():.2f}" if len(valid_distances) > 0 else "N/A"],
+            "Best Category": [valid_points['Accuracy Bucket'].value_counts().idxmax() if len(valid_points) > 0 else 'N/A'],
+            "Decision Insight": ["Review points > 20 m first; re-check mapping source for poor accuracy"],
+        }
+        summary_df_latlong = pd.DataFrame(summary_data_latlong)
+        csv_summary_latlong = summary_df_latlong.to_csv(index=False).encode("utf-8")
+
+        html_parts = [
+            f"<h1>📍 Lat/Long Accuracy Dashboard</h1>",
+            f"<h3>Gateway Id: {gateway_id_value}</h3>",
+            f"<h4>Reported Date: {reported_date_value}</h4>",
+            "<h2>Key Metrics</h2>",
+            summary_df_latlong.to_html(index=False, classes='summary-table')
+        ]
+        html_parts.append("<h2>Accuracy Distribution</h2>")
+        import plotly.io as pio
+        html_parts.append(pio.to_html(fig_pie, full_html=False, include_plotlyjs='cdn'))
+        html_parts.append("<h2>Distance Error Trend</h2>")
+        html_parts.append(pio.to_html(error_fig, full_html=False, include_plotlyjs=False))
+        html_parts.append("<h2>Latitude Trend</h2>")
+        html_parts.append(pio.to_html(lat_fig, full_html=False, include_plotlyjs=False))
+        html_parts.append("<h2>Longitude Trend</h2>")
+        html_parts.append(pio.to_html(lon_fig, full_html=False, include_plotlyjs=False))
+        html_parts.append("<h2>Top Insight</h2>")
+        html_parts.append("<p>Focus corrective action on any samples in the &gt; 20 m bucket. This indicates poor DCU GPS accuracy or mapping alignment issues.</p>")
+        full_html = f"""<!doctype html>
+    <html>
+    <head>
+      <meta charset='utf-8' />
+      <title>Lat/Long Accuracy Dashboard</title>
+      <script src='https://cdn.plot.ly/plotly-latest.min.js'></script>
+      <style>
+        body{{font-family:Arial,Helvetica,sans-serif;margin:20px;color:#243447}}
+        .summary-table{{border-collapse:collapse;width:100%}}
+        .summary-table th,.summary-table td{{border:1px solid #e6eef3;padding:8px;text-align:left}}
+      </style>
+    </head>
+    <body>
+    {''.join(html_parts)}
+    </body>
+    </html>
+    """
+        html_bytes = full_html.encode("utf-8")
+
+        col_dl_a, col_dl_b, col_dl_c = st.columns([1, 1, 2])
+        with col_dl_a:
+            st.download_button(
+                label="📥 Download Lat/Long Summary CSV",
+                data=csv_summary_latlong,
+                file_name="latlong_accuracy_summary.csv",
+                mime="text/csv"
+            )
+        with col_dl_b:
+            st.download_button(
+                label="📥 Download Lat/Long Full CSV",
+                data=csv_latlong,
+                file_name="latlong_accuracy_analysis.csv",
+                mime="text/csv"
+            )
+        with col_dl_c:
+            st.download_button(
+                label="📥 Download Lat/Long HTML Report",
+                data=html_bytes,
+                file_name="latlong_accuracy_dashboard.html",
+                mime="text/html"
+            )
 
     # -------------------------
     # Export / Download: CSVs and single self-contained HTML report

@@ -1,18 +1,40 @@
 # _pages/weekly_data_analysis.py
+"""Weekly SLA analysis tool for smart meter data."""
+
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import altair as alt
-import seaborn as sns
-import matplotlib.pyplot as plt
 import io
 import os
 import base64
 import tempfile
-import pythoncom
-import win32com.client as win32
+import logging
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+
+# Optional imports
+try:
+    import altair as alt
+except ImportError:
+    alt = None
+
+try:
+    import seaborn as sns
+except ImportError:
+    sns = None
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
+# Cross-platform utilities
+from utils.platform_utils import EMAIL_SERVICE
+from utils.error_handler import ErrorHandler, handle_errors
+
+logger = logging.getLogger(__name__)
 
 # -----------------------
 # Helpers (pure functions / IO helpers)
@@ -81,48 +103,34 @@ def get_excel_writer(buffer: io.BytesIO):
     except Exception:
         return pd.ExcelWriter(buffer, engine="openpyxl")
 
-def send_outlook_report(email_to: str, full_report_bytes: bytes, missing_report_bytes: bytes, html_report: str) -> Tuple[bool, str]:
+def send_email_report(
+    email_to: str,
+    full_report_bytes: bytes,
+    missing_report_bytes: bytes,
+    html_report: str,
+) -> Tuple[bool, str]:
     """
-    Send an Outlook email with attachments. Returns (success, message).
+    Send a report email with attachments. Returns (success, message).
+    Cross-platform compatible with fallback support.
+    
     This function does not call Streamlit UI functions and is safe to call from run() when user requests.
     """
-    try:
-        pythoncom.CoInitialize()
-        outlook = win32.Dispatch("Outlook.Application")
-        mail = outlook.CreateItem(0)
-        mail.To = email_to
-        mail.Subject = "SLA Week Performance"
-        mail.HTMLBody = html_report
-
-        # Save attachments temporarily
-        tmp_full = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-        tmp_full.write(full_report_bytes)
-        tmp_full.close()
-
-        tmp_missing = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-        tmp_missing.write(missing_report_bytes)
-        tmp_missing.close()
-
-        mail.Attachments.Add(tmp_full.name)
-        mail.Attachments.Add(tmp_missing.name)
-
-        mail.Send()
-        pythoncom.CoUninitialize()
-
-        # cleanup temp files
-        try:
-            os.remove(tmp_full.name)
-            os.remove(tmp_missing.name)
-        except Exception:
-            pass
-
-        return True, "Email sent"
-    except Exception as e:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-        return False, str(e)
+    # Prepare attachments
+    attachments = [
+        ("SLA_Week_Performance.xlsx", full_report_bytes),
+        ("Missing_Meters_Weekly.xlsx", missing_report_bytes),
+    ]
+    
+    # Send email with automatic fallback
+    success, msg = EMAIL_SERVICE.send_email(
+        to_email=email_to,
+        subject="SLA Week Performance",
+        html_body=html_report,
+        attachments=attachments,
+        use_outlook=True,
+    )
+    
+    return success, msg
 
 # -----------------------
 # Main UI entrypoint
@@ -350,19 +358,20 @@ def run():
     # Email send UI
     st.subheader("📧 Email Reports")
     email_to = st.text_input("Enter recipient email address")
-    if st.button("Send Reports via Outlook"):
+    if st.button("Send Reports via Email"):
         if not email_to:
             st.error("Please enter a recipient email address.")
         else:
-            with st.spinner("Sending email via Outlook..."):
+            with st.spinner("Sending email..."):
                 try:
-                    ok, msg = send_outlook_report(email_to, output.getvalue(), missing_output.getvalue(), html_report)
+                    ok, msg = send_email_report(email_to, output.getvalue(), missing_output.getvalue(), html_report)
                     if ok:
-                        st.success("Reports sent successfully via Outlook!")
+                        st.success(f"Reports sent successfully! {msg}")
                     else:
                         st.error(f"Failed to send email: {msg}")
                 except Exception as e:
                     st.error(f"Failed to send email: {e}")
+                    logger.error(f"Email send failed: {e}")
 
 if __name__ == "__main__":
     run()
