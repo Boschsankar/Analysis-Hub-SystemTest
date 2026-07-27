@@ -71,6 +71,16 @@ TOOLS_METADATA = [
         category="validation",
         dependencies=["pandas", "plotly"],
     ),
+    
+    ToolMetadata(
+    title="OD Performance Analytics",
+    module_path="_pages.od_performance",
+    accent_color="#00897b",
+    description="Connect, Disconnect and OD command performance benchmarking with executive decision report.",
+    button_label="Open OD Performance",
+    category="analysis",
+    dependencies=["pandas", "plotly", "openpyxl"],
+    ),
 ]
 
 
