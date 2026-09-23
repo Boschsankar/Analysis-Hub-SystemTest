@@ -6,11 +6,17 @@ Unified dashboard for all smart meter analysis utilities.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import importlib
 from typing import Optional, Tuple
 
-import streamlit as st
+try:
+    import streamlit as st
+    _STREAMLIT_AVAILABLE = True
+except Exception as _streamlit_err:  # noqa: F841
+    st = None
+    _STREAMLIT_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -81,6 +87,15 @@ TOOLS_METADATA = [
     category="analysis",
     dependencies=["pandas", "plotly", "openpyxl"],
     ),
+    ToolMetadata(
+        title="NMS HES Status Check",
+        module_path="_pages.nms_hes_status_check",
+        accent_color="#7c3aed",
+        description="Monitor NMS vs HES health, communication drift, and healthy-percentage coverage.",
+        button_label="Open NMS/HES Status Check",
+        category="analysis",
+        dependencies=["pandas", "numpy", "openpyxl"],
+    ),
 ]
 
 
@@ -96,35 +111,55 @@ def configure_page() -> None:
     st.markdown(
         """
         <style>
+            html, body, [data-testid="stAppViewContainer"], .stApp {
+                font-size: 15px !important;
+                background: #f3f6fb;
+            }
+
+            .block-container {
+                padding-top: 1rem;
+                padding-left: 0.5rem;
+                padding-right: 0.5rem;
+                max-width: 100% !important;
+                margin: 0;
+            }
+
             .tool-card {
                 border-left: 5px solid var(--accent-color);
-                padding: 1rem;
-                margin: 0.5rem 0;
-                border-radius: 0.5rem;
-                background-color: #f9f9f9;
-                transition: all 0.3s ease;
+                padding: 0.9rem 0.9rem 0.75rem;
+                margin: 0.35rem 0;
+                border-radius: 0.7rem;
+                background-color: #ffffff;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+                transition: all 0.2s ease;
+                min-height: 160px;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
             }
             .tool-card:hover {
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                transform: translateX(4px);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+                transform: translateY(-2px);
             }
             .tool-card h3 {
-                margin: 0 0 0.5rem;
-                font-size: 1.2rem;
+                margin: 0 0 0.45rem;
+                font-size: 1.1rem;
                 font-weight: 700;
+                line-height: 1.3;
             }
             .tool-card p {
-                margin: 0.25rem 0;
-                color: #666;
-                font-size: 0.95rem;
+                margin: 0.25rem 0 0.7rem;
+                color: #555;
+                font-size: 0.9rem;
+                line-height: 1.45;
             }
             .status-badge {
                 display: inline-block;
-                padding: 0.25rem 0.75rem;
+                padding: 0.28rem 0.7rem;
                 border-radius: 20px;
-                font-size: 0.85rem;
+                font-size: 0.8rem;
                 font-weight: 600;
-                margin-bottom: 0.5rem;
+                margin-bottom: 0.4rem;
             }
             .status-available {
                 background: #dbeafe;
@@ -137,9 +172,40 @@ def configure_page() -> None:
             .header-banner {
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                padding: 2rem;
-                border-radius: 0.5rem;
-                margin-bottom: 2rem;
+                padding: 1.1rem 1.25rem;
+                border-radius: 0.7rem;
+                margin-bottom: 1rem;
+            }
+            .header-banner h1 {
+                font-size: 1.8rem;
+                margin-bottom: 0.2rem;
+            }
+            .header-banner p {
+                font-size: 0.92rem;
+                margin: 0;
+            }
+            div[data-testid="stSidebar"] {
+                font-size: 0.95rem;
+            }
+            div[data-testid="stSidebarNav"] {
+                padding-top: 0.5rem;
+            }
+            .stButton > button {
+                height: 2.4rem;
+                font-size: 0.9rem;
+                padding: 0.45rem 0.8rem;
+            }
+            .stMetric {
+                font-size: 0.95rem;
+            }
+            .stMetric > div {
+                padding: 0.7rem 0.9rem;
+            }
+            .stDataFrame {
+                font-size: 0.9rem;
+            }
+            .stSubheader {
+                font-size: 1.05rem;
             }
         </style>
         """,
@@ -281,10 +347,10 @@ def show_home_page() -> None:
         st.warning("No tools registered. Please check the configuration.")
         return
     
-    # Display tools in a grid
-    cols = st.columns(3)
+    # Display tools in a wide grid that fills the screen
+    cols = st.columns(4)
     for idx, (tool_id, metadata) in enumerate(tools.items()):
-        col = cols[idx % 3]
+        col = cols[idx % 4]
         render_tool_card(metadata, col)
 
 
@@ -344,4 +410,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Home.py is intended to be run via Streamlit (streamlit run Home.py).
+    # The environment-variable check is brittle and can fail even when Streamlit is
+    # launching the script correctly. Run the app directly when Streamlit is available;
+    # otherwise show a clear instruction for the supported launch methods.
+    if _STREAMLIT_AVAILABLE:
+        main()
+    else:
+        print("Please start the app using: streamlit run Home.py\nOr use the launcher: python run_app.py")
+        sys.exit(1)

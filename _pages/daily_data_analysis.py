@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import io
 import os
+import base64
 import logging
 import zipfile
 import re
@@ -76,16 +77,25 @@ def normalize_columns(columns: pd.Index) -> pd.Index:
         .str.strip("_")
     )
 
-def normalize_meter_ids(values: pd.Series) -> pd.Series:
-    """Normalize meter IDs from Excel/CSV without changing meaningful text IDs."""
-    return (
-        values.astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-        .str.replace(r"\s+", "", regex=True)
-        .str.upper()
-        .replace({"NAN": "", "NONE": "", "NAT": ""})
-    )
+def normalize_meter_ids(values):
+    """Normalize meter IDs from Excel/CSV and handle single scalar values safely."""
+    if isinstance(values, pd.Series):
+        return (
+            values.astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+            .str.replace(r"\s+", "", regex=True)
+            .str.upper()
+            .replace({"NAN": "", "NONE": "", "NAT": ""})
+        )
+
+    value = str(values).strip()
+    value = re.sub(r"\.0$", "", value)
+    value = re.sub(r"\s+", "", value)
+    value = value.upper()
+    if value in {"NAN", "NONE", "NAT"}:
+        return ""
+    return value
 
 def _decode_ascii_hex(hex_value: str) -> str:
     try:
@@ -525,6 +535,110 @@ def _resolve_expected_samples(row, instant_expected_mode: Optional[str] = None):
     return None
 
 
+def _generate_expected_profile_timestamps(profile_type: str, capture_period: Optional[int], reference_date: Optional[pd.Timestamp]) -> List[pd.Timestamp]:
+    if reference_date is None or pd.isna(reference_date):
+        return []
+    normalized_date = pd.Timestamp(reference_date).normalize()
+    profile_type = str(profile_type or "").strip()
+
+    if profile_type == "Block":
+        period_minutes = capture_period if isinstance(capture_period, (int, np.integer)) else None
+        if period_minutes not in {15, 30, 60}:
+            period_minutes = 15
+        start = normalized_date
+        end = normalized_date + pd.Timedelta(days=1) - pd.Timedelta(minutes=period_minutes)
+        if end < start:
+            return [start]
+        return list(pd.date_range(start=start, end=end, freq=f"{int(period_minutes)}min"))
+
+    if profile_type == "Instant":
+        return [
+            normalized_date + pd.Timedelta(hours=0),
+            normalized_date + pd.Timedelta(hours=8),
+            normalized_date + pd.Timedelta(hours=16),
+        ]
+
+    return [normalized_date]
+
+
+def _build_missing_profile_detail(profiles: pd.DataFrame, meter_summary: pd.DataFrame, meter_list: pd.DataFrame) -> pd.DataFrame:
+    if profiles.empty or meter_summary.empty:
+        return pd.DataFrame(columns=["meter_id", "OEM", "profile_type", "capture_period", "actual_samples", "expected_samples", "achieved_percent", "missing_sample_count", "missing_timestamps"])
+
+    meter_info = meter_list[["meter_id", "OEM", "capture_period"]].drop_duplicates(subset="meter_id", keep="first").copy()
+    meter_info["capture_period"] = pd.to_numeric(meter_info["capture_period"], errors="coerce")
+    actual_by_meter_profile = profiles[["meter_id", "profile_type", "timestamp"]].copy()
+    actual_by_meter_profile["timestamp"] = pd.to_datetime(actual_by_meter_profile["timestamp"], errors="coerce")
+    actual_by_meter_profile = actual_by_meter_profile.dropna(subset=["timestamp"]).copy()
+
+    rows = []
+    for _, row in meter_summary.iterrows():
+        meter_id = normalize_meter_ids(row.get("meter_id"))
+        profile_type = str(row.get("profile_type") or "").strip()
+        if not meter_id or not profile_type:
+            continue
+
+        actual_samples = int(row.get("actual_samples") or 0)
+        expected_samples = _coerce_expected_count(row.get("expected_samples"))
+        achieved_percent = float(row.get("achieved_percent") or 0)
+        if expected_samples is None or expected_samples <= 0:
+            continue
+        if achieved_percent >= 100 and actual_samples >= expected_samples:
+            continue
+
+        oem = "Unknown"
+        if meter_id in set(meter_info["meter_id"]):
+            oem_row = meter_info[meter_info["meter_id"] == meter_id].iloc[0]
+            oem = str(oem_row.get("OEM", "Unknown") or "Unknown")
+        capture_period = meter_info.loc[meter_info["meter_id"] == meter_id, "capture_period"]
+        capture_value = int(capture_period.iloc[0]) if not capture_period.empty and pd.notna(capture_period.iloc[0]) else None
+
+        reference_dates = actual_by_meter_profile[
+            (actual_by_meter_profile["meter_id"] == meter_id) &
+            (actual_by_meter_profile["profile_type"] == profile_type)
+        ]["timestamp"].dt.normalize().drop_duplicates().sort_values().tolist()
+        if not reference_dates:
+            latest_timestamp = pd.to_datetime(profiles["timestamp"], errors="coerce").max()
+            reference_dates = [latest_timestamp.normalize()] if pd.notna(latest_timestamp) else [pd.Timestamp.now().normalize()]
+
+        missing_timestamps = []
+        for reference_date in reference_dates:
+            expected_times = _generate_expected_profile_timestamps(profile_type, capture_period=capture_value, reference_date=reference_date)
+            if not expected_times:
+                continue
+            actual_times = actual_by_meter_profile[
+                (actual_by_meter_profile["meter_id"] == meter_id) &
+                (actual_by_meter_profile["profile_type"] == profile_type) &
+                (actual_by_meter_profile["timestamp"].dt.normalize() == pd.Timestamp(reference_date).normalize())
+            ]["timestamp"].dt.floor("min").tolist()
+            actual_set = {pd.Timestamp(ts).floor("min") for ts in actual_times}
+            missing_timestamps.extend(
+                ts.strftime("%Y-%m-%d %H:%M")
+                for ts in expected_times
+                if ts.floor("min") not in actual_set
+            )
+
+        if not missing_timestamps and actual_samples < expected_samples:
+            missing_timestamps = ["Expected records not observed for the reporting window."]
+
+        rows.append({
+            "meter_id": meter_id,
+            "OEM": oem,
+            "profile_type": profile_type,
+            "capture_period": capture_value if capture_value is not None else "",
+            "actual_samples": actual_samples,
+            "expected_samples": expected_samples,
+            "achieved_percent": round(achieved_percent, 1),
+            "missing_sample_count": len(missing_timestamps),
+            "missing_timestamps": "; ".join(missing_timestamps) if missing_timestamps else "",
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["meter_id", "OEM", "profile_type", "capture_period", "actual_samples", "expected_samples", "achieved_percent", "missing_sample_count", "missing_timestamps"])
+
+    return pd.DataFrame(rows).sort_values(["achieved_percent", "missing_sample_count", "meter_id", "profile_type"], ascending=[True, False, True, True]).reset_index(drop=True)
+
+
 def _build_insights(
     report_title: str,
     total_meters: int,
@@ -598,12 +712,28 @@ def run():
 
     col1, col2 = st.columns(2)
     with col1:
-        block_uploads = st.file_uploader("Upload Block Profiles", type=["xlsx", "xls", "csv", "txt", "zip"], accept_multiple_files=True)
-        instant_uploads = st.file_uploader("Upload Instant Profiles", type=["xlsx", "xls", "csv", "txt", "zip"], accept_multiple_files=True)
+        block_uploads = st.file_uploader(
+            "Upload Block Profiles",
+            type=["xlsx", "xls", "csv", "txt", "zip"],
+            accept_multiple_files=True,
+        )
+        instant_uploads = st.file_uploader(
+            "Upload Instant Profiles",
+            type=["xlsx", "xls", "csv", "txt", "zip"],
+            accept_multiple_files=True,
+        )
     with col2:
-        daily_uploads = st.file_uploader("Upload Daily Profiles", type=["xlsx", "xls", "csv", "txt", "zip"], accept_multiple_files=True)
-        billing_uploads = st.file_uploader("Upload Billing Profiles", type=["xlsx", "xls", "csv", "txt", "zip"], accept_multiple_files=True)
-        meter_list_file = st.file_uploader("Upload Actual Meter List (.xlsx)", type=["xlsx"])
+        daily_uploads = st.file_uploader(
+            "Upload Daily Profiles",
+            type=["xlsx", "xls", "csv", "txt", "zip"],
+            accept_multiple_files=True,
+        )
+        billing_uploads = st.file_uploader(
+            "Upload Billing Profiles",
+            type=["xlsx", "xls", "csv", "txt", "zip"],
+            accept_multiple_files=True,
+        )
+        meter_list_file = st.file_uploader("Upload Actual Meter List", type=["xlsx", "xls", "csv", "txt"])
 
     instant_expected_mode = st.selectbox(
         "Instant expected sample mode",
@@ -690,7 +820,6 @@ def run():
         meter_list = meter_list[meter_list["meter_id"] != ""].copy()
 
     report_title, subject_prefix, file_prefix = _infer_report_context(meter_list, meter_list_name)
-    report_date_token = datetime.now().strftime("%d-%b-%Y")
 
     with st.spinner("Extracting profile matrices..."):
         block_df = read_profile(block_files, "Block") if block_files else pd.DataFrame(columns=["meter_id", "timestamp", "profile_type"])
@@ -709,6 +838,7 @@ def run():
     profiles = profiles[profiles["meter_id"] != ""].copy()
 
     reporting_date = profiles["timestamp"].max().strftime("%d-%b-%Y")
+    report_date_token = reporting_date
     st.markdown(f"### {report_title}")
     st.markdown(f"### 📅 Reporting Date: **{reporting_date}**")
 
@@ -777,18 +907,43 @@ def run():
     ).reset_index()
     meter_level["overall_percent"] = np.where(meter_level["total_expected"] > 0, (meter_level["total_actual"] / meter_level["total_expected"]) * 100, 0)
 
-    profile_kpi = meter_summary.groupby("profile_type").agg(
-        total_meters=("meter_id", "nunique"),
-        reporting=("actual_samples", lambda x: (x > 0).sum()),
-        non_reporting=("actual_samples", lambda x: (x == 0).sum()),
-        avg_achieved=("achieved_percent", "mean"),
-        full_achieved=("achieved_percent", lambda x: (x >= 100).sum()),
-    ).reset_index()
+    profile_kpi = (
+        meter_summary.groupby("profile_type")
+        .apply(lambda g: pd.Series({
+            "total_meters": g["meter_id"].nunique(),
+            "reporting": g.loc[g["actual_samples"] > 0, "meter_id"].nunique(),
+            "non_reporting": g.loc[g["actual_samples"] == 0, "meter_id"].nunique(),
+            "avg_achieved": g["achieved_percent"].mean(),
+            "full_achieved": g.loc[g["achieved_percent"] >= 100, "meter_id"].nunique(),
+        }))
+        .reset_index()
+    )
+    profile_kpi["non_reporting"] = np.where(
+        profile_kpi["total_meters"] > 0,
+        profile_kpi["total_meters"] - profile_kpi["reporting"],
+        0,
+    )
     profile_kpi["Full Achievement %"] = np.where(
         profile_kpi["total_meters"] > 0,
         (profile_kpi["full_achieved"] / profile_kpi["total_meters"] * 100).round(1),
         0,
     )
+    profile_kpi["Not 100% Achieved Meters"] = np.where(
+        profile_kpi["total_meters"] > 0,
+        (profile_kpi["total_meters"] - profile_kpi["full_achieved"]).clip(lower=0),
+        0,
+    )
+    profile_below_100 = profile_kpi[profile_kpi["Not 100% Achieved Meters"] > 0][[
+        "profile_type", "total_meters", "full_achieved", "Not 100% Achieved Meters", "Full Achievement %"
+    ]].rename(columns={
+        "profile_type": "Profile",
+        "total_meters": "Total Meters",
+        "full_achieved": "100% Achieved Meters",
+        "Not 100% Achieved Meters": "Not 100% Achieved Meters",
+        "Full Achievement %": "100% Achievement %",
+    }).sort_values("Not 100% Achieved Meters", ascending=False)
+
+    missing_profile_detail = _build_missing_profile_detail(profiles, meter_summary, meter_list)
 
     # Communication Status Table
     st.subheader("🏭 Communication status - OEM wise")
@@ -805,6 +960,19 @@ def run():
 
     st.subheader("Profile-wise SLA Summary")
     st.dataframe(profile_kpi, use_container_width=True)
+
+    st.subheader("Profiles below 100% achievement")
+    st.dataframe(profile_below_100, use_container_width=True, hide_index=True)
+
+    st.subheader("Missing sample timestamps for <100% meter profiles")
+    if missing_profile_detail.empty:
+        st.info("No meter/profile records are below 100% achievement for the selected reporting window.")
+    else:
+        st.dataframe(
+            missing_profile_detail[["meter_id", "OEM", "profile_type", "capture_period", "actual_samples", "expected_samples", "achieved_percent", "missing_sample_count", "missing_timestamps"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # SLA Performance Graph Title
     st.subheader("📊 SLA Profile Performance Visual breakdown")
@@ -825,6 +993,18 @@ def run():
     phase_chart_data["Profile"] = pd.Categorical(phase_chart_data["Profile"], categories=profile_order, ordered=True)
     phase_chart_data = phase_chart_data.sort_values(by=["OEM_Phase_Drill", "Profile"])
 
+    phase_profile_summary = phase_chart_data[phase_chart_data["Profile"].astype(str) != "Total Meters"].copy()
+    phase_profile_summary = phase_profile_summary[["OEM_Phase_Drill", "Profile", "Meters", "Percent"]].rename(columns={"OEM_Phase_Drill": "OEM wise"})
+    phase_profile_summary["Percent"] = pd.to_numeric(phase_profile_summary["Percent"], errors="coerce").fillna(0)
+    phase_profile_summary = phase_profile_summary.sort_values(["OEM wise", "Profile"], kind="mergesort")
+
+    st.subheader("100% Achieved Percentage Meters")
+    st.dataframe(
+        phase_profile_summary.rename(columns={"Percent": "100% Achieved %"}).style.format({"100% Achieved %": "{:.1f}%"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     dashboard_insights = _build_insights(report_title, total_meters, reporting_meters, non_reporting, oem_kpi, profile_kpi, phase_chart_data)
     with st.expander("Stakeholder insights", expanded=True):
         for insight in dashboard_insights:
@@ -833,7 +1013,7 @@ def run():
     if plt is not None and sns is not None:
         fig2, ax2 = plt.subplots(figsize=(8.0, 4.2), dpi=130)
         sns.barplot(data=phase_chart_data, x="OEM_Phase_Drill", y="Meters", hue="Profile", hue_order=profile_order, palette="Accent", ax=ax2)
-        ax2.set_title(f"{report_title} - OEM-wise SLA Profile Performance", fontsize=9, fontweight="bold")
+        ax2.set_title(f"{report_title} - 100% Achieved Percentage Meters", fontsize=9, fontweight="bold")
         
         ax2.set_xlabel("OEM wise", fontsize=7.5)
         ax2.set_ylabel("Meters Volume Count", fontsize=7.5)
@@ -936,6 +1116,7 @@ def run():
                         oem_kpi.to_excel(writer, index=False, sheet_name="OEM Communication")
                         profile_kpi.to_excel(writer, index=False, sheet_name="Profile SLA")
                         phase_chart_data.rename(columns={"OEM_Phase_Drill": "OEM wise"}).to_excel(writer, index=False, sheet_name="OEM SLA Summary")
+                        missing_profile_detail.to_excel(writer, index=False, sheet_name="Missing Sample Detail")
                         if not meter_combined_display.empty:
                             meter_combined_display.to_excel(writer, index=False, sheet_name="Meter Combined Performance")
                     full_bytes = output.getvalue()
@@ -1010,9 +1191,9 @@ def run():
                     <h4>Profile-wise SLA Summary</h4>
                     <div style="margin-bottom: 20px;">{profile_kpi_html}</div>
 
-                    <h4>OEM-wise SLA Profile Performance</h4>
+                    <h4>100% Achieved Percentage Meters</h4>
                     <div style="margin-bottom: 20px;">{phase_kpi_html}</div>
-                    <p><img src="cid:{phase_chart_name}" alt="OEM-wise SLA Profile Performance" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;"></p>
+                    <p><img src="cid:{phase_chart_name}" alt="100% Achieved Percentage Meters" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;"></p>
 
                     <h4>❌ Missing Meters Breakdown View</h4>
                     <p>{"No missing meters were identified." if missing_list_df.empty else f"{len(missing_list_df)} missing meter(s) are attached in the missing meter register."}</p>
@@ -1052,6 +1233,7 @@ def run():
 
     # Local Excel Exports Link
     st.subheader("📥 Export Workbook Sheets")
+    phase_chart_data = phase_chart_data if "phase_chart_data" in locals() else pd.DataFrame(columns=["OEM_Phase_Drill", "Profile", "Meters", "Percent", "total_meters"])
     try:
         output = io.BytesIO()
         with get_excel_writer(output) as writer:
@@ -1060,16 +1242,69 @@ def run():
             oem_kpi.to_excel(writer, index=False, sheet_name="OEM Communication")
             profile_kpi.to_excel(writer, index=False, sheet_name="Profile SLA")
             phase_chart_data.rename(columns={"OEM_Phase_Drill": "OEM wise"}).to_excel(writer, index=False, sheet_name="OEM SLA Summary")
+            missing_profile_detail.to_excel(writer, index=False, sheet_name="Missing Sample Detail")
             missing_list_df.to_excel(writer, index=False, sheet_name="Missing Meter Register")
             if not meter_combined_display.empty:
                 meter_combined_display.to_excel(writer, index=False, sheet_name="Meter Combined Performance")
-        
+
+        phase_chart_html = ""
+        if os.path.exists("phase_profile_chart.png"):
+            with open("phase_profile_chart.png", "rb") as f:
+                phase_chart_html = f"<h3>100% Achieved Percentage Meters Chart</h3><p><img src='data:image/png;base64,{base64.b64encode(f.read()).decode('utf-8')}' style='max-width:100%; height:auto; border:1px solid #ddd; border-radius:4px;'></p>"
+
+        missing_chart_html = ""
+        if not missing_list_df.empty and os.path.exists("missing_oem_chart.png"):
+            with open("missing_oem_chart.png", "rb") as f:
+                missing_chart_html = f"<h3>Missing Meters by OEM</h3><p><img src='data:image/png;base64,{base64.b64encode(f.read()).decode('utf-8')}' style='max-width:100%; height:auto; border:1px solid #ddd; border-radius:4px;'></p>"
+
+        html_output = f"""
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>{report_title} - Daily SLA Report</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; color: #1f2937; margin: 24px; }}
+                table {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
+                th, td {{ border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; }}
+                th {{ background: #f3f4f6; }}
+                .small {{ font-size: 12px; color: #4b5563; }}
+            </style>
+        </head>
+        <body>
+            <h2>{report_title}</h2>
+            <p class="small">Reporting date: {reporting_date}</p>
+            <h3>Executive Summary</h3>
+            {pd.DataFrame({
+                'Metric': ['Total Baseline Meters', 'Reporting Unique Count', 'Non-Reporting Faults'],
+                'Value': [total_meters, reporting_meters, non_reporting]
+            }).to_html(index=False, border=0)}
+            <h3>Profile-wise SLA Summary</h3>
+            {profile_kpi.to_html(index=False, border=0)}
+            <h3>Profiles below 100% Achievement</h3>
+            {profile_below_100.to_html(index=False, border=0)}
+            <h3>100% Achieved Percentage Meters</h3>
+            {phase_profile_summary.rename(columns={'OEM wise': 'OEM wise', 'Profile': 'Profile', 'Meters':'Meters', 'Percent':'Percent'}).to_html(index=False, border=0, justify='left')}
+            {phase_chart_html}
+            <h3>OEM Communication Status</h3>
+            {oem_kpi.to_html(index=False, border=0)}
+            {missing_chart_html}
+        </body>
+        </html>
+        """
+
         st.download_button(
             label="📥 Download Full Report (Excel)",
             data=output.getvalue(),
             file_name=f"{_safe_filename_part(file_prefix)}_Daily_SLA_Report_{report_date_token}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="full_report_download"
+        )
+        st.download_button(
+            label="📄 Download Full Report (HTML)",
+            data=html_output.encode("utf-8"),
+            file_name=f"{_safe_filename_part(file_prefix)}_Daily_SLA_Report_{report_date_token}.html",
+            mime="text/html",
+            key="full_report_html_download"
         )
     except Exception as e:
         st.warning(f"Could not build local download context stream: {e}")

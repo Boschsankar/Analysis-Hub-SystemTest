@@ -710,13 +710,22 @@ def run():
     ).reset_index()
     meter_level["overall_percent"] = np.where(meter_level["total_expected"] > 0, (meter_level["total_actual"] / meter_level["total_expected"]) * 100, 0)
 
-    profile_kpi = meter_summary.groupby("profile_type").agg(
-        total_meters=("meter_id", "nunique"),
-        reporting=("actual_samples", lambda x: (x > 0).sum()),
-        non_reporting=("actual_samples", lambda x: (x == 0).sum()),
-        avg_achieved=("achieved_percent", "mean"),
-        full_achieved=("achieved_percent", lambda x: (x >= 100).sum()),
-    ).reset_index()
+    profile_kpi = (
+        meter_summary.groupby("profile_type")
+        .apply(lambda g: pd.Series({
+            "total_meters": g["meter_id"].nunique(),
+            "reporting": g.loc[g["actual_samples"] > 0, "meter_id"].nunique(),
+            "non_reporting": g.loc[g["actual_samples"] == 0, "meter_id"].nunique(),
+            "avg_achieved": g["achieved_percent"].mean(),
+            "full_achieved": g.loc[g["achieved_percent"] >= 100, "meter_id"].nunique(),
+        }))
+        .reset_index()
+    )
+    profile_kpi["non_reporting"] = np.where(
+        profile_kpi["total_meters"] > 0,
+        profile_kpi["total_meters"] - profile_kpi["reporting"],
+        0,
+    )
     profile_kpi["Full Achievement %"] = np.where(
         profile_kpi["total_meters"] > 0,
         (profile_kpi["full_achieved"] / profile_kpi["total_meters"] * 100).round(1),
