@@ -96,6 +96,15 @@ TOOLS_METADATA = [
         category="analysis",
         dependencies=["pandas", "numpy", "openpyxl"],
     ),
+    ToolMetadata(
+        title="Last Gasp & First Breath Validation",
+        module_path="_pages.lastgasp_firstbreath_analysis",
+        accent_color="#d97706",
+        description="Validate alert coverage, duplicate events, and the 3-minute SLA for Last Gasp and First Breath alerts.",
+        button_label="Open Alert Validation",
+        category="validation",
+        dependencies=["pandas", "numpy", "openpyxl", "xlsxwriter"],
+    ),
 ]
 
 

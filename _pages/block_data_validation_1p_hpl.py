@@ -519,8 +519,16 @@ def _extract_hes_excel_frames(uploaded_files):
     return frames
 
 
-def _build_zero_voltage_report_from_hes(frames):
-    """Return a DataFrame of per-meter date/time zero-voltage interval records."""
+def _build_intermittent_zero_report(frames, target_meter_ids, max_gap_minutes=30):
+    """Find every zero-voltage sample for target meters.
+
+    A zero-voltage block is actionable in its own right; it must not be
+    hidden merely because the workbook has no adjacent normal samples. Where
+    adjacent samples are available within ``max_gap_minutes``, they are added
+    to the report as supporting context.
+    """
+    target_set = {_normalize_meter_id(value) for value in target_meter_ids}
+    target_set.discard("")
     rows = []
     for frame in frames:
         if frame is None or frame.empty:
@@ -532,7 +540,8 @@ def _build_zero_voltage_report_from_hes(frames):
             "meter id", "meterid", "meter", "device id", "deviceid", "asset id", "assetid", "name"
         ])
         date_col = _find_matching_column(frame.columns, [
-            "date", "datetime", "date time", "timestamp", "time stamp"
+            "meter date & time", "meter date time", "meter datetime",
+            "date", "datetime", "date time", "timestamp", "time stamp",
         ])
         time_col = _find_matching_column(frame.columns, [
             "time", "time stamp", "record time", "reading time"
@@ -548,40 +557,111 @@ def _build_zero_voltage_report_from_hes(frames):
             continue
 
         for _, row in frame.iterrows():
-            meter_id = row.get(meter_col, "")
-            if pd.isna(meter_id):
-                meter_id = "Unknown"
-            meter_id = str(meter_id).strip() or "Unknown"
+            meter_id = _normalize_meter_id(row.get(meter_col, ""))
+            if meter_id not in target_set:
+                continue
 
             dt_value = row.get(date_col) if date_col else pd.NaT
-            if time_col and time_col in row:
+            # A combined Meter Date & Time column already contains the block
+            # timestamp. Do not overwrite its time with HES Received Time.
+            date_label = str(date_col).strip().lower() if date_col else ""
+            has_time_in_date_column = "time" in date_label
+            if time_col and time_col in row and not has_time_in_date_column:
                 dt_value = _safe_datetime_from_parts(dt_value, row.get(time_col))
             elif date_col:
                 dt_value = _safe_datetime_from_parts(dt_value)
             else:
                 dt_value = pd.NaT
 
-            for voltage_col in voltage_cols:
-                try:
-                    value = pd.to_numeric(row.get(voltage_col, 0), errors="coerce")
-                except Exception:
-                    value = 0
-                if pd.isna(value):
-                    continue
-                if float(value) == 0:
-                    rows.append({
-                        "Meter ID": meter_id,
-                        "Date Time": pd.Timestamp(dt_value) if pd.notna(dt_value) else "Unknown",
-                        "Voltage Field": voltage_col,
-                        "Voltage Value": value,
-                    })
+            if pd.isna(dt_value):
+                continue
+
+            voltage_values = {
+                str(column): pd.to_numeric(row.get(column), errors="coerce")
+                for column in voltage_cols
+            }
+            if not voltage_values or any(pd.isna(value) for value in voltage_values.values()):
+                continue
+
+            rows.append({
+                "Meter ID": meter_id,
+                "Date Time": pd.Timestamp(dt_value),
+                "Voltage Values": voltage_values,
+            })
 
     if not rows:
-        return pd.DataFrame(columns=["Meter ID", "Date Time", "Voltage Field", "Voltage Value"])
+        return pd.DataFrame(columns=[
+            "Meter ID", "Date Time", "Meter Type", "Zero Voltage Fields",
+            "Previous Sample", "Following Sample", "Previous Voltage Values",
+            "Zero Voltage Values", "Following Voltage Values", "Sample Gap (Minutes)",
+        ])
 
-    result = pd.DataFrame(rows)
-    result = result.sort_values(["Meter ID", "Date Time", "Voltage Field"], kind="mergesort").reset_index(drop=True)
-    return result
+    samples = pd.DataFrame(rows).sort_values(
+        ["Meter ID", "Date Time"], kind="mergesort"
+    ).reset_index(drop=True)
+    findings = []
+
+    for meter_id, meter_samples in samples.groupby("Meter ID", sort=False):
+        meter_samples = meter_samples.reset_index(drop=True)
+        for row_index in range(len(meter_samples)):
+            zero_row = meter_samples.iloc[row_index]
+
+            zero_values = zero_row["Voltage Values"]
+            zero_fields = [
+                field for field, value in zero_values.items() if float(value) == 0
+            ]
+            if not zero_fields:
+                continue
+
+            def display_values(values):
+                return ", ".join(
+                    f"{field}: {float(values[field]):.1f} V"
+                    for field in sorted(values)
+                )
+
+            previous_row = meter_samples.iloc[row_index - 1] if row_index else None
+            following_row = (
+                meter_samples.iloc[row_index + 1]
+                if row_index + 1 < len(meter_samples) else None
+            )
+
+            def nearby_sample(sample, direction):
+                if sample is None:
+                    return None
+                gap = abs(
+                    (zero_row["Date Time"] - sample["Date Time"]).total_seconds()
+                ) / 60
+                if (
+                    sample["Date Time"].date() != zero_row["Date Time"].date()
+                    or gap > max_gap_minutes
+                ):
+                    return None
+                return sample
+
+            previous_row = nearby_sample(previous_row, "previous")
+            following_row = nearby_sample(following_row, "following")
+            is_three_phase = len(zero_values) >= 3
+
+            findings.append({
+                "Meter ID": meter_id,
+                "Date Time": zero_row["Date Time"],
+                "Meter Type": "3-Phase" if is_three_phase else "1-Phase",
+                "Zero Voltage Fields": ", ".join(zero_fields),
+                "Previous Sample": previous_row["Date Time"] if previous_row is not None else pd.NaT,
+                "Following Sample": following_row["Date Time"] if following_row is not None else pd.NaT,
+                "Previous Voltage Values": display_values(previous_row["Voltage Values"]) if previous_row is not None else "Not available",
+                "Zero Voltage Values": display_values(zero_values),
+                "Following Voltage Values": display_values(following_row["Voltage Values"]) if following_row is not None else "Not available",
+                "Sample Gap (Minutes)": max_gap_minutes,
+            })
+
+    return pd.DataFrame(findings).sort_values(
+        ["Meter ID", "Date Time"], kind="mergesort"
+    ).reset_index(drop=True) if findings else pd.DataFrame(columns=[
+        "Meter ID", "Date Time", "Meter Type", "Zero Voltage Fields",
+        "Previous Sample", "Following Sample", "Previous Voltage Values",
+        "Zero Voltage Values", "Following Voltage Values", "Sample Gap (Minutes)",
+    ])
 
 
 def _normalize_meter_id(value):
@@ -777,7 +857,7 @@ def evaluate_electrical_physics(metrics, active_load, time_frame):
 
 
 def main():
-    st.set_page_config(layout="wide", page_title="Universal Meter Data Analyzer")
+    st.set_page_config(layout="wide", page_title="Intermittent Zero-Value Analysis")
     st.title("⚡ Dynamic Multi-Vendor DLMS Stream Diagnostic Terminal")
     st.markdown(
         "Automated smart meter structural compliance engine. Handles alignment variables layout processing smoothly.")
@@ -804,13 +884,23 @@ def main():
         help="Upload individual HES report files or a ZIP containing multiple Excel reports. Each row is checked for non-zero voltage values; zero-voltage records are separated by meter and timestamp.",
     )
     target_meter_file = st.file_uploader(
-        "Upload target meter list for comparison (.csv, .xlsx, .xls, .txt)",
+        "Upload target meter list (.csv, .xlsx, .xls, .txt)",
         type=["csv", "xlsx", "xls", "txt"],
         accept_multiple_files=False,
-        help="Optional: upload a meter list so the app can highlight which target meters are impacted by zero-voltage anomalies.",
+        help="Required for the intermittent-zero analysis. Only meters in this list are analysed and reported.",
+    )
+    max_sample_gap = st.number_input(
+        "Maximum expected interval between samples (minutes)",
+        min_value=1,
+        max_value=180,
+        value=30,
+        step=5,
+        help="A zero value is reported only when normal samples exist immediately before and after it within this gap.",
     )
 
-    if uploaded_hes_files:
+    # Legacy raw-zero view retained below for reference. It is intentionally
+    # disabled because it reports every zero cell, including non-target meters.
+    if uploaded_hes_files and False:
         hes_frames = _extract_hes_excel_frames(uploaded_hes_files)
         zero_voltage_df = _build_zero_voltage_report_from_hes(hes_frames)
         kpi_df = _build_voltage_kpi_from_hes(hes_frames)
@@ -939,6 +1029,86 @@ def main():
                     st.success(f"Target meters not impacted: {', '.join(non_impacted_target_ids)}")
             else:
                 st.warning("The uploaded target list could not be parsed. Please use a CSV, Excel, or text file with meter IDs in one column.")
+
+    if uploaded_hes_files:
+        if target_meter_file is None:
+            st.warning("Upload the target meter list to run the zero-voltage analysis. Non-target meters are never included.")
+        else:
+            target_meter_ids = _read_target_meter_ids(target_meter_file)
+            if not target_meter_ids:
+                st.warning("The target list could not be read. Use a CSV, Excel, or text file containing meter IDs in one column.")
+            else:
+                hes_frames = _extract_hes_excel_frames(uploaded_hes_files)
+                zero_voltage_df = _build_intermittent_zero_report(
+                    hes_frames, target_meter_ids, max_gap_minutes=max_sample_gap
+                )
+                observed_ids = set()
+                for frame in hes_frames:
+                    observed_ids.update(_extract_meter_ids_from_frame(frame))
+                observed_target_ids = observed_ids.intersection(target_meter_ids)
+                impacted_ids = set(zero_voltage_df["Meter ID"]) if not zero_voltage_df.empty else set()
+
+                st.markdown("### Zero-Voltage Decision Dashboard")
+                st.caption(
+                    "Only target meters are analysed. Every zero-voltage sample is reported, even when adjacent normal samples are unavailable. "
+                    "For 3-phase meters, the report identifies each phase-voltage field that is zero."
+                )
+                kpis = st.columns(4)
+                kpis[0].metric("Target meters", f"{len(set(target_meter_ids)):,}")
+                kpis[1].metric("Target meters with data", f"{len(observed_target_ids):,}")
+                kpis[2].metric("Meters to investigate", f"{len(impacted_ids):,}")
+                kpis[3].metric("Abnormal timestamps", f"{len(zero_voltage_df):,}")
+
+                impacted_meter_summary = pd.DataFrame(columns=[
+                    "Meter ID", "Abnormal Timestamps", "First Abnormal Timestamp",
+                    "Last Abnormal Timestamp", "Meter Type"
+                ])
+                if not zero_voltage_df.empty:
+                    impacted_meter_summary = (
+                        zero_voltage_df.groupby("Meter ID", as_index=False)
+                        .agg(
+                            **{
+                                "Abnormal Timestamps": ("Date Time", "count"),
+                                "First Abnormal Timestamp": ("Date Time", "min"),
+                                "Last Abnormal Timestamp": ("Date Time", "max"),
+                                "Meter Type": ("Meter Type", "first"),
+                            }
+                        )
+                        .sort_values(["Abnormal Timestamps", "Meter ID"], ascending=[False, True])
+                    )
+
+                target_status_df = pd.DataFrame({"Meter ID": sorted(set(target_meter_ids))})
+                target_status_df["Analysis Status"] = target_status_df["Meter ID"].map(
+                    lambda meter_id: "Zero voltage detected" if meter_id in impacted_ids else "No zero voltage detected"
+                )
+
+                if zero_voltage_df.empty:
+                    st.success("Decision: no zero-voltage sample was found for the target meters.")
+                else:
+                    st.warning(f"Decision: investigate {len(impacted_ids):,} target meter(s) at {len(zero_voltage_df):,} zero-voltage timestamp(s).")
+
+                summary_tab, evidence_tab, target_tab = st.tabs([
+                    "Impacted target meters", "Zero-voltage timestamps", "All target meters"
+                ])
+                with summary_tab:
+                    st.dataframe(impacted_meter_summary, use_container_width=True, hide_index=True)
+                with evidence_tab:
+                    st.dataframe(zero_voltage_df, use_container_width=True, hide_index=True)
+                    st.caption("Each row is a detected zero-voltage block. Nearby samples are shown when available within the selected context gap.")
+                with target_tab:
+                    st.dataframe(target_status_df, use_container_width=True, hide_index=True)
+
+                report_bytes = io.BytesIO()
+                with pd.ExcelWriter(report_bytes, engine="openpyxl") as writer:
+                    impacted_meter_summary.to_excel(writer, sheet_name="Impacted Targets", index=False)
+                    zero_voltage_df.to_excel(writer, sheet_name="Timestamp Evidence", index=False)
+                    target_status_df.to_excel(writer, sheet_name="All Target Meters", index=False)
+                st.download_button(
+                    "Download zero-voltage report",
+                    report_bytes.getvalue(),
+                    file_name="zero_voltage_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
     if not (execute_audit and stream_payload.strip()):
         if uploaded_hes_files:
